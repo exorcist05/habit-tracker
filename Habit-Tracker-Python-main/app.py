@@ -1,0 +1,260 @@
+"""
+app.py — Routine Planner & Habit Checklist Entrypoint
+Streamlit app run command: streamlit run app.py
+"""
+import streamlit as st
+
+# ─── Page config MUST be first ───────────────────────────────────────────────
+st.set_page_config(
+    page_title="Routine Planner",
+    page_icon="🗓️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+from utils.styles import inject_styles, st_html, xp_bar
+inject_styles()
+
+
+# ─── Cookie-based session ─────────────────────────────────────────────────────
+from extra_streamlit_components import CookieManager
+
+# CookieManager must be instantiated at module level (before any other st calls)
+cookie_manager = CookieManager()
+
+from config import JWT_COOKIE_NAME
+from services.auth_service import validate_token
+
+
+import urllib.parse
+from typing import Optional
+
+def get_cookie_from_headers(cookie_name: str) -> Optional[str]:
+    try:
+        headers = st.context.headers
+        cookie_header = headers.get("cookie") or headers.get("Cookie")
+        cookies_dict = dict(st.context.cookies)
+        
+        with open("scratch/load_session_log.txt", "a") as f:
+            f.write(f"[get_cookie_from_headers] Raw header: {cookie_header[:50] if cookie_header else 'None'}...\n")
+            f.write(f"[get_cookie_from_headers] st.context.cookies keys: {list(cookies_dict.keys())}\n")
+            f.write(f"[get_cookie_from_headers] st.context.cookies value: {cookies_dict.get(cookie_name)[:20] if cookies_dict.get(cookie_name) else 'None'}...\n")
+            
+        # Try st.context.cookies first
+        val = st.context.cookies.get(cookie_name)
+        if val:
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            return urllib.parse.unquote(val)
+            
+        # Fallback to manual parsing
+        if cookie_header:
+            for cookie in cookie_header.split(";"):
+                parts = cookie.split("=", 1)
+                if len(parts) == 2:
+                    name = parts[0].strip()
+                    val = parts[1].strip()
+                    if name == cookie_name:
+                        if val.startswith('"') and val.endswith('"'):
+                            val = val[1:-1]
+                        return urllib.parse.unquote(val)
+    except Exception as e:
+        with open("scratch/load_session_log.txt", "a") as f:
+            f.write(f"[get_cookie_from_headers] Error: {e}\n")
+    return None
+
+
+def _load_session():
+    """Read JWT from cookie and validate. Populates st.session_state['user']."""
+    try:
+        if "user" not in st.session_state or st.session_state.get("user") is None:
+            token = get_cookie_from_headers(JWT_COOKIE_NAME)
+            token_src = "header"
+            if not token:
+                token = cookie_manager.get(JWT_COOKIE_NAME)
+                token_src = "cookie_manager"
+            
+            with open("scratch/load_session_log.txt", "a") as f:
+                f.write(f"[_load_session] Found token from {token_src}: {token[:15] if token else 'None'}...\n")
+                
+            if token:
+                user = validate_token(token)
+                with open("scratch/load_session_log.txt", "a") as f:
+                    f.write(f"[_load_session] Validated user: {user.get('username') if user else 'None'}\n")
+                if user:
+                    st.session_state["user"] = user
+                    st.session_state["token"] = token
+                else:
+                    # Token expired or invalid — clear it
+                    with open("scratch/load_session_log.txt", "a") as f:
+                        f.write(f"[_load_session] Token validation failed. Deleting cookie...\n")
+                    cookie_manager.delete(JWT_COOKIE_NAME)
+                    st.session_state["user"] = None
+            else:
+                st.session_state["user"] = None
+    except Exception as e:
+        with open("scratch/load_session_log.txt", "a") as f:
+            f.write(f"[_load_session] Exception in load session: {e}\n")
+
+
+def _render_sidebar(user: dict):
+    """Sidebar navigation."""
+    with st.sidebar:
+        # Brand Header
+        st_html("""
+        <div style="text-align:center; padding:1.25rem 0 0.75rem;">
+            <div style="font-size:2.8rem; line-height: 1;">🗓️</div>
+            <div style="font-weight:800; color:#1C1C1E; font-size:1.15rem; margin-top:8px;">Routine Planner</div>
+            <div style="color:#6B7280; font-size:0.75rem;">Streamline your days</div>
+        </div>
+        """)
+
+        # User Profile Indicator
+        from utils.helpers import get_level_info
+        li = get_level_info(user.get("xp", 0))
+        display = user.get("display_name") or user.get("username", "User")
+        st_html(f"""
+        <div style="background:rgba(99,102,241,0.06); border:1px solid rgba(99,102,241,0.15);
+                    border-radius:8px; padding:0.6rem 0.85rem; margin-bottom:0.75rem;">
+            <div style="font-weight:600; color:#1C1C1E; font-size:0.88rem;">{display}</div>
+            <div style="font-size:0.72rem; color:#6366F1; font-weight: 500; margin-top: 2px; margin-bottom: 4px;">
+                ⭐ Lv. {li['level']} · {li['title']} · {user.get('points',0):,} pts
+            </div>
+            {xp_bar(li['pct'], li['xp_in_level'], li['xp_for_level'])}
+        </div>
+        """)
+
+        # Navigation
+        nav_items = [
+            "📅 Today Checklist",
+            "📋 Habits Library",
+            "🗓️ Routine Planner",
+            "🛍️ Reward Shop",
+            "📊 Analytics & Stats",
+            "👤 Profile & Level",
+            "⚙️ Settings",
+        ]
+
+        PAGE_KEY_MAP = {
+            "📅 Today Checklist":   "today",
+            "📋 Habits Library":     "habits",
+            "🗓️ Routine Planner":   "schedule",
+            "🛍️ Reward Shop":       "rewards",
+            "📊 Analytics & Stats": "stats",
+            "👤 Profile & Level":   "profile",
+            "⚙️ Settings":           "settings",
+        }
+
+        if "sidebar_nav" not in st.session_state:
+            current = st.session_state.get("current_page", "today")
+            current_label = next((k for k, v in PAGE_KEY_MAP.items() if v == current), nav_items[0])
+            st.session_state["sidebar_nav"] = current_label
+
+        selected = st.radio(
+            "Navigation",
+            nav_items,
+            key="sidebar_nav",
+            label_visibility="collapsed",
+        )
+        st.session_state["current_page"] = PAGE_KEY_MAP[selected]
+
+        st.divider()
+
+        if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+            cookie_manager.delete(JWT_COOKIE_NAME)
+            st.session_state.clear()
+            st.rerun()
+
+
+def _render_page(page_key: str):
+    """Dispatch to the correct view module."""
+    if page_key == "today":
+        from views.today import render_today
+        render_today()
+    elif page_key == "habits":
+        from views.habits import render_habits
+        render_habits()
+    elif page_key == "schedule":
+        from views.schedule import render_schedule
+        render_schedule()
+    elif page_key == "rewards":
+        from views.rewards import render_rewards
+        render_rewards()
+    elif page_key == "stats":
+        from views.stats import render_stats
+        render_stats()
+    elif page_key == "profile":
+        from views.profile import render_profile
+        render_profile()
+    elif page_key == "settings":
+        from views.settings import render_settings
+        render_settings()
+    else:
+        from views.today import render_today
+        render_today()
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    _load_session()
+    
+    with open("scratch/navigation_log.txt", "a") as f:
+        f.write(f"[main] query_params={dict(st.query_params)}, current_page={st.session_state.get('current_page')}, keys={list(st.session_state.keys())}\n")
+
+    user = st.session_state.get("user")
+
+    if user is None:
+        # Check DB connectivity first
+        from db.database import ping
+        ok, err = ping()
+        if not ok:
+            st.error(f"⚠️ Cannot connect to MongoDB: {err}")
+            st.info("Please check your `MONGODB_URL` in `.env` and restart the app.")
+            st.code("MONGODB_URL=mongodb+srv://user:pass@cluster.mongodb.net/habit_tracker", language="bash")
+            st.stop()
+
+        from views.auth import render_auth
+        render_auth(cookie_manager)
+    else:
+        # ── Handle Click Actions from Query Parameters globally ───────────────────
+        if st.query_params:
+            action = st.query_params.get("action")
+            task_id = st.query_params.get("id")
+            
+            with open("scratch/query_log.txt", "a") as f:
+                f.write(f"Query params detected: action={action}, id={task_id}\n")
+            
+            if action and task_id:
+                if not st.session_state.get("query_param_processed"):
+                    st.session_state["query_param_processed"] = True
+                    user_id = user["id"]
+                    with open("scratch/query_log.txt", "a") as f:
+                        f.write(f"Processing action={action} for user={user_id} and task={task_id}\n")
+                    if action == "toggle":
+                        from services.schedule_service import toggle_completion
+                        toggle_completion(task_id, user_id)
+                        from services.auth_service import get_user_by_id
+                        st.session_state["user"] = get_user_by_id(user_id)
+                    elif action == "delete":
+                        from services.schedule_service import delete_schedule_entry
+                        delete_schedule_entry(task_id)
+                    elif action == "extend":
+                        from services.schedule_service import extend_task_time
+                        extend_task_time(task_id, 30)
+                    elif action == "compress":
+                        from services.schedule_service import extend_task_time
+                        extend_task_time(task_id, -30)
+                    
+                    st.session_state["current_page"] = "schedule"
+                    st.session_state["sidebar_nav"] = "🗓️ Routine Planner"
+                    st.query_params.clear()
+                    st.rerun()
+        else:
+            st.session_state["query_param_processed"] = False
+
+        _render_sidebar(user)
+        page = st.session_state.get("current_page", "today")
+        _render_page(page)
+
+
+main()
